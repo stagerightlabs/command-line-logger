@@ -8,18 +8,16 @@ use Illuminate\Container\Container;
 use Monolog\Handler\HandlerInterface;
 use Monolog\Level;
 use Monolog\LogRecord;
-use Symfony\Component\Console\Output\ConsoleOutput;
+use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\VarDumper\Cloner\VarCloner;
 use Symfony\Component\VarDumper\Dumper\CliDumper;
 
 final class Handler implements HandlerInterface
 {
     /**
-     *
-     *
-     * @var ConsoleOutput
+     * The container binding holding the output of the running command.
      */
-    private ConsoleOutput $output;
+    private const OUTPUT = 'command.log.output';
 
     /**
      * @see Symfony\Component\Console\Formatter\OutputFormatterInterface
@@ -31,15 +29,30 @@ final class Handler implements HandlerInterface
     private const VERBOSITY_VERY_VERBOSE = 128;
     private const VERBOSITY_DEBUG = 256;
 
-    /**
-     * @codeCoverageIgnore
-     */
     public function __construct(
         private Container $container,
         private CliDumper $dumper,
         private VarCloner $cloner
-    ) {
-        $this->output = $this->container->get('command.log.output');
+    ) {}
+
+    /**
+     * Resolve the output of the command that is currently running.
+     *
+     * There may not be one: the console channel can be part of a log stack
+     * that is also used outside of a command, and the subscriber releases
+     * the output once a command has finished. Resolving this per record
+     * rather than caching it also keeps the handler correct when a log
+     * channel outlives the command that created it.
+     */
+    protected function output(): ?OutputInterface
+    {
+        if (! $this->container->bound(self::OUTPUT)) {
+            return null;
+        }
+
+        $output = $this->container->get(self::OUTPUT);
+
+        return $output instanceof OutputInterface ? $output : null;
     }
 
     /**
@@ -52,7 +65,9 @@ final class Handler implements HandlerInterface
      */
     public function isHandling(LogRecord $record): bool
     {
-        return $this->shouldBeHandled($record);
+        $output = $this->output();
+
+        return $output !== null && $this->shouldBeHandled($record, $output);
     }
 
     /**
@@ -70,8 +85,10 @@ final class Handler implements HandlerInterface
      */
     public function handle(LogRecord $record): bool
     {
-        if ($this->shouldBeHandled($record)) {
-            $this->write($record);
+        $output = $this->output();
+
+        if ($output !== null && $this->shouldBeHandled($record, $output)) {
+            $this->write($record, $output);
         }
 
         // Return false to allow bubbling
@@ -81,9 +98,9 @@ final class Handler implements HandlerInterface
     /**
      * Use verbosity level to determine if a message should be logged.
      */
-    protected function shouldBeHandled(LogRecord $record): bool
+    protected function shouldBeHandled(LogRecord $record, OutputInterface $output): bool
     {
-        return match ($this->output->getVerbosity()) {
+        return match ($output->getVerbosity()) {
             self::VERBOSITY_SILENT => false,
             self::VERBOSITY_QUIET => $record->level->value >= 400,
             self::VERBOSITY_NORMAL => $record->level->value >= 300,
@@ -97,16 +114,16 @@ final class Handler implements HandlerInterface
     /**
      * Write a message to console output.
      */
-    protected function write(LogRecord $record): void
+    protected function write(LogRecord $record, OutputInterface $output): void
     {
         // Prepare a message prefix based on log level
-        $level = match ($this->output->isDecorated()) {
+        $level = match ($output->isDecorated()) {
             true => $this->getDecoratedMessagePrefix($record->level),
             false => '[' . strtoupper($record->level->name) . '] ',
         };
 
         // Write the message to console output
-        $this->output->writeln($level . $record->message);
+        $output->writeln($level . $record->message);
 
         // Dump out the 'extra' payload if present
         if ($extra = $record->extra) {
